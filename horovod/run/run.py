@@ -18,12 +18,12 @@ from __future__ import print_function
 import argparse
 import hashlib
 import os
-import sys
 import re
+import sys
 import textwrap
-
-from socket import AF_INET
 from psutil import net_if_addrs
+from socket import AF_INET
+
 try:
     from shlex import quote
 except ImportError:
@@ -268,16 +268,19 @@ def _driver_fn(all_host_names, local_host_names, settings):
         driver.shutdown()
 
 
-def _get_driver_ip(common_intfs):
+def _get_driver_ip(interfaces):
     """
-    :param common_intfs: object return by `_driver_fn`
+    :param interfaces: set of potential network interfaces that can be used
     :return: driver ip. We make sure all workers can connect to this ip.
     """
-    iface = list(common_intfs)[0]
     driver_ip = None
-    for addr in net_if_addrs()[iface]:
-        if addr.family == AF_INET:
-            driver_ip = addr.address
+    ifaces = [iface for iface in list(interfaces) if iface in net_if_addrs()]
+
+    for iface in ifaces:
+        for addr in net_if_addrs()[iface]:
+            if addr.family == AF_INET:
+                driver_ip = addr.address
+                break
 
     if not driver_ip:
         raise RuntimeError(
@@ -609,6 +612,12 @@ def parse_args():
                                   help='Run Horovod using the MPI controller. This will '
                                        'be the default if Horovod was built with MPI support.')
 
+    parser.add_argument('--btl_tcp_if_include', action='store', dest='btl_tcp_if_include',
+                        help='Network interfaces to use for communication '
+                             'separated by comma. If not specified, Horovod will '
+                             'find the common NICs among all the workers and use '
+                             'it. Example, --btl_tcp_if_include eth0,eth1')
+
     args = parser.parse_args()
 
     if args.config_file:
@@ -780,20 +789,26 @@ def _run(args):
             print('SSH was successful into all the remote hosts.')
 
     if len(remote_host_names) > 0:
-        if settings.verbose >= 2:
-            print('Testing interfaces on all the hosts.')
+        if args.btl_tcp_if_include:
+            # If btl_tcp_if_include is provided, we will use those interfaces. All the workers
+            # must have at least one of those interfaces available.
+            btl_tcp_if_include = args.btl_tcp_if_include.split(',')
+            common_intfs = set(nic for nic in btl_tcp_if_include if nic)
+        else:
+            # Find the set of common, routed interfaces on all the hosts (remote
+            # and local) and specify it in the args to be used by NCCL. It is
+            # expected that the following function will find at least one interface
+            # otherwise, it will raise an exception.
+            if settings.verbose >= 2:
+                print('Testing interfaces on all the hosts.')
 
-        local_host_names = set(all_host_names) - set(remote_host_names)
-        # Find the set of common, routed interfaces on all the hosts (remote
-        # and local) and specify it in the args to be used by NCCL. It is
-        # expected that the following function will find at least one interface
-        # otherwise, it will raise an exception.
-        common_intfs = _driver_fn(all_host_names, local_host_names,
-                                  settings, fn_cache=fn_cache)
+            local_host_names = set(all_host_names) - set(remote_host_names)
+            common_intfs = _driver_fn(all_host_names, local_host_names,
+                                      settings, fn_cache=fn_cache)
 
-        if settings.verbose >= 2:
-            print('Interfaces on all the hosts were successfully checked.')
-            print('Common interface found: ' + ' '.join(common_intfs))
+            if settings.verbose >= 2:
+                print('Interfaces on all the hosts were successfully checked.')
+                print('Common interface found: ' + ' '.join(common_intfs))
 
     else:
         if settings.verbose >= 2:
